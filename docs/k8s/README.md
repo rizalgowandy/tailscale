@@ -3,8 +3,8 @@ There are quite a few ways of running Tailscale inside a Kubernetes Cluster, som
 ## Instructions
 ### Setup
 1. (Optional) Create the following secret which will automate login.<br>
-   You will need to get an auth key from [Tailscale Admin Console](https://login.tailscale.com/admin/authkeys).<br>
-   If you don't provide you the key, you can still use authenticate by using the url in the logs.
+   You will need to get an [auth key](https://tailscale.com/kb/1085/auth-keys/) from [Tailscale Admin Console](https://login.tailscale.com/admin/authkeys).<br>
+   If you don't provide the key, you can still authenticate using the url in the logs.
 
    ```yaml
    apiVersion: v1
@@ -38,20 +38,18 @@ Running as a sidecar allows you to directly expose a Kubernetes pod over Tailsca
 
    ```bash
    make sidecar
-   # If you're not using an AuthKey, authenticate by grabbing the Login URL here:
+   # If not using an auth key, authenticate by grabbing the Login URL here:
    kubectl logs nginx ts-sidecar
    ```
 
 1. Check if you can to connect to nginx over Tailscale:
 
    ```bash
-   curl "http://$(tailscale ip -4 nginx)"
-   ```
-
-   Or, if you have MagicDNS enabled:
-
-   ```bash
    curl http://nginx
+   ```
+   Or, if you have [MagicDNS](https://tailscale.com/kb/1081/magicdns/) disabled:
+   ```bash
+   curl "http://$(tailscale ip -4 nginx)"
    ```
 
 
@@ -59,32 +57,34 @@ Running as a sidecar allows you to directly expose a Kubernetes pod over Tailsca
 Running a Tailscale proxy allows you to provide inbound connectivity to a Kubernetes Service.
 
 1. Provide the `ClusterIP` of the service you want to reach by either:
-   creating a new deployment
+
+   **Creating a new deployment**
    ```bash
    kubectl create deployment nginx --image nginx
    kubectl expose deployment nginx --port 80
    export DEST_IP="$(kubectl get svc nginx -o=jsonpath='{.spec.clusterIP}')"
    ```
-    or, using an existing service
+   **Using an existing service**
    ```bash
    export DEST_IP="$(kubectl get svc <SVC_NAME> -o=jsonpath='{.spec.clusterIP}')"
    ```
 
 1. Deploy the proxy pod
+
    ```bash
    make proxy
-   # If you're not using an AuthKey, authenticate by grabbing the Login URL here:
+   # If not using an auth key, authenticate by grabbing the Login URL here:
    kubectl logs proxy
    ```
 
 1. Check if you can to connect to nginx over Tailscale:
 
    ```bash
-   curl "http://$(tailscale ip -4 proxy)"
+   curl http://proxy
    ```
 
-   Or, if you have MagicDNS enabled:
+   Or, if you have [MagicDNS](https://tailscale.com/kb/1081/magicdns/) disabled:
 
    ```bash
-   curl http://proxy
+   curl "http://$(tailscale ip -4 proxy)"
    ```
