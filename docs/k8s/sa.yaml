@@ -1,5 +1,4 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: tailscale
-  namespace: default
+  name: {{SA_NAME}}
