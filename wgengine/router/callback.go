@@ -10,6 +10,13 @@ import (
 	"tailscale.com/net/dns"
 )
 
+// Allow the platform to register a method to fetch the BaseConfig.
+var dnsBaseConfigFn func() dns.OSConfig
+
+func RegisterDnsBaseConfigGetter(getBaseConfig func() dns.OSConfig) {
+	dnsBaseConfigFn = getBaseConfig
+}
+
 // CallbackRouter is an implementation of both Router and dns.OSConfigurator.
 // When either network or DNS settings are changed, SetBoth is called with both configs.
 // Mainly used as a shim for OSes that want to set both network and
@@ -50,7 +57,11 @@ func (r *CallbackRouter) SupportsSplitDNS() bool {
 }
 
 func (r *CallbackRouter) GetBaseConfig() (dns.OSConfig, error) {
-	return dns.OSConfig{}, dns.ErrGetBaseConfigNotSupported
+	if dnsBaseConfigFn == nil {
+		return dns.OSConfig{}, dns.ErrGetBaseConfigNotSupported
+	}
+
+	return dnsBaseConfigFn(), nil
 }
 
 func (r *CallbackRouter) Close() error {
