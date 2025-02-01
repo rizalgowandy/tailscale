@@ -1,9 +1,7 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !windows && !js
-// +build !windows,!js
+//go:build !windows && !wasm && !plan9 && !tamago
 
 package paths
 
@@ -14,33 +12,40 @@ import (
 	"runtime"
 
 	"golang.org/x/sys/unix"
+	"tailscale.com/version/distro"
 )
 
 func init() {
 	stateFileFunc = stateFileUnix
+	ensureStateDirPerms = ensureStateDirPermsUnix
 }
 
 func statePath() string {
 	switch runtime.GOOS {
-	case "linux":
+	case "linux", "illumos", "solaris":
 		return "/var/lib/tailscale/tailscaled.state"
 	case "freebsd", "openbsd":
 		return "/var/db/tailscale/tailscaled.state"
 	case "darwin":
 		return "/Library/Tailscale/tailscaled.state"
+	case "aix":
+		return "/var/tailscale/tailscaled.state"
 	default:
 		return ""
 	}
 }
 
 func stateFileUnix() string {
+	if distro.Get() == distro.Gokrazy {
+		return "/perm/tailscaled/tailscaled.state"
+	}
 	path := statePath()
 	if path == "" {
 		return ""
 	}
 
 	try := path
-	for i := 0; i < 3; i++ { // check writability of the file, /var/lib/tailscale, and /var/lib
+	for range 3 { // check writability of the file, /var/lib/tailscale, and /var/lib
 		err := unix.Access(try, unix.O_RDWR)
 		if err == nil {
 			return path
@@ -63,7 +68,7 @@ func xdgDataHome() string {
 	return filepath.Join(os.Getenv("HOME"), ".local/share")
 }
 
-func ensureStateDirPerms(dir string) error {
+func ensureStateDirPermsUnix(dir string) error {
 	if filepath.Base(dir) != "tailscale" {
 		return nil
 	}
@@ -80,9 +85,4 @@ func ensureStateDirPerms(dir string) error {
 		return nil
 	}
 	return os.Chmod(dir, perm)
-}
-
-// LegacyStateFilePath is not applicable to UNIX; it is just stubbed out.
-func LegacyStateFilePath() string {
-	return ""
 }

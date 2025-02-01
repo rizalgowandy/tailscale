@@ -1,19 +1,19 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 //go:build linux || windows || darwin
-// +build linux windows darwin
 
 package cli
 
 import (
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	ps "github.com/mitchellh/go-ps"
+	"tailscale.com/version/distro"
 )
 
 // fixTailscaledConnectError is called when the local tailscaled has
@@ -25,32 +25,50 @@ func fixTailscaledConnectError(origErr error) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to local Tailscaled process and failed to enumerate processes while looking for it")
 	}
-	found := false
+	var foundProc ps.Process
 	for _, proc := range procs {
 		base := filepath.Base(proc.Executable())
 		if base == "tailscaled" {
-			found = true
+			foundProc = proc
 			break
 		}
 		if runtime.GOOS == "darwin" && base == "IPNExtension" {
-			found = true
+			foundProc = proc
 			break
 		}
 		if runtime.GOOS == "windows" && strings.EqualFold(base, "tailscaled.exe") {
-			found = true
+			foundProc = proc
 			break
 		}
 	}
-	if !found {
+	if foundProc == nil {
 		switch runtime.GOOS {
 		case "windows":
 			return fmt.Errorf("failed to connect to local tailscaled process; is the Tailscale service running?")
 		case "darwin":
 			return fmt.Errorf("failed to connect to local Tailscale service; is Tailscale running?")
 		case "linux":
-			return fmt.Errorf("failed to connect to local tailscaled; it doesn't appear to be running (sudo systemctl start tailscaled ?)")
+			var hint string
+			if isSystemdSystem() {
+				hint = " (sudo systemctl start tailscaled ?)"
+			}
+			return fmt.Errorf("failed to connect to local tailscaled; it doesn't appear to be running%s", hint)
 		}
 		return fmt.Errorf("failed to connect to local tailscaled process; it doesn't appear to be running")
 	}
-	return fmt.Errorf("failed to connect to local tailscaled (which appears to be running). Got error: %w", origErr)
+	return fmt.Errorf("failed to connect to local tailscaled (which appears to be running as %v, pid %v). Got error: %w", foundProc.Executable(), foundProc.Pid(), origErr)
+}
+
+// isSystemdSystem reports whether the current machine uses systemd
+// and in particular whether the systemctl command is available.
+func isSystemdSystem() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	switch distro.Get() {
+	case distro.QNAP, distro.Gokrazy, distro.Synology, distro.Unraid:
+		return false
+	}
+	_, err := exec.LookPath("systemctl")
+	return err == nil
 }

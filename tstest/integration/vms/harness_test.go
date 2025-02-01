@@ -1,9 +1,7 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !windows
-// +build !windows
+//go:build !windows && !plan9
 
 package vms
 
@@ -14,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path"
@@ -25,7 +24,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/net/proxy"
-	"inet.af/netaddr"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstest/integration"
 	"tailscale.com/tstest/integration/testcontrol"
@@ -35,12 +33,14 @@ import (
 type Harness struct {
 	testerDialer   proxy.Dialer
 	testerDir      string
-	bins           *integration.Binaries
+	binaryDir      string
+	cli            string
+	daemon         string
 	pubKey         string
 	signer         ssh.Signer
 	cs             *testcontrol.Server
 	loginServerURL string
-	testerV4       netaddr.IP
+	testerV4       netip.Addr
 	ipMu           *sync.Mutex
 	ipMap          map[string]ipMapping
 }
@@ -62,7 +62,7 @@ func newHarness(t *testing.T) *Harness {
 			// TODO: this is wrong.
 			// It is also only one of many configurations.
 			// Figure out how to scale it up.
-			Resolvers:    []dnstype.Resolver{{Addr: "100.100.100.100"}, {Addr: "8.8.8.8"}},
+			Resolvers:    []*dnstype.Resolver{{Addr: "100.100.100.100"}, {Addr: "8.8.8.8"}},
 			Domains:      []string{"record"},
 			Proxied:      true,
 			ExtraRecords: []tailcfg.DNSRecord{{Name: "extratest.record", Type: "A", Value: "1.2.3.4"}},
@@ -134,11 +134,11 @@ func newHarness(t *testing.T) *Harness {
 	loginServer := fmt.Sprintf("http://%s", ln.Addr())
 	t.Logf("loginServer: %s", loginServer)
 
-	bins := integration.BuildTestBinaries(t)
-
 	h := &Harness{
 		pubKey:         string(pubkey),
-		bins:           bins,
+		binaryDir:      integration.BinaryDir(t),
+		cli:            integration.TailscaleBinary(t),
+		daemon:         integration.TailscaledBinary(t),
 		signer:         signer,
 		loginServerURL: loginServer,
 		cs:             cs,
@@ -146,7 +146,7 @@ func newHarness(t *testing.T) *Harness {
 		ipMap:          ipMap,
 	}
 
-	h.makeTestNode(t, bins, loginServer)
+	h.makeTestNode(t, loginServer)
 
 	return h
 }
@@ -156,7 +156,7 @@ func (h *Harness) Tailscale(t *testing.T, args ...string) []byte {
 
 	args = append([]string{"--socket=" + filepath.Join(h.testerDir, "sock")}, args...)
 
-	cmd := exec.Command(h.bins.CLI, args...)
+	cmd := exec.Command(h.cli, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func (h *Harness) Tailscale(t *testing.T, args ...string) []byte {
 // enables us to make connections to and from the tailscale network being
 // tested. This mutates the Harness to allow tests to dial into the tailscale
 // network as well as control the tester's tailscaled.
-func (h *Harness) makeTestNode(t *testing.T, bins *integration.Binaries, controlURL string) {
+func (h *Harness) makeTestNode(t *testing.T, controlURL string) {
 	dir := t.TempDir()
 	h.testerDir = dir
 
@@ -179,7 +179,7 @@ func (h *Harness) makeTestNode(t *testing.T, bins *integration.Binaries, control
 	}
 
 	cmd := exec.Command(
-		bins.Daemon,
+		h.daemon,
 		"--tun=userspace-networking",
 		"--state="+filepath.Join(dir, "state.json"),
 		"--socket="+filepath.Join(dir, "sock"),
@@ -222,7 +222,7 @@ outer:
 		}
 	}
 
-	run(t, dir, bins.CLI,
+	run(t, dir, h.cli,
 		"--socket="+filepath.Join(dir, "sock"),
 		"up",
 		"--login-server="+controlURL,
@@ -237,6 +237,6 @@ outer:
 	h.testerV4 = bytes2Netaddr(h.Tailscale(t, "ip", "-4"))
 }
 
-func bytes2Netaddr(inp []byte) netaddr.IP {
-	return netaddr.MustParseIP(string(bytes.TrimSpace(inp)))
+func bytes2Netaddr(inp []byte) netip.Addr {
+	return netip.MustParseAddr(string(bytes.TrimSpace(inp)))
 }

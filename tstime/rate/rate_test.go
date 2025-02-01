@@ -1,6 +1,5 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 // This is a modified, simplified version of code from golang.org/x/time/rate.
 
@@ -8,15 +7,10 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build go1.7
-// +build go1.7
-
 package rate
 
 import (
-	"context"
 	"math"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -62,10 +56,6 @@ var (
 	t0 = mono.Now()
 	t1 = t0.Add(time.Duration(1) * d)
 	t2 = t0.Add(time.Duration(2) * d)
-	t3 = t0.Add(time.Duration(3) * d)
-	t4 = t0.Add(time.Duration(4) * d)
-	t5 = t0.Add(time.Duration(5) * d)
-	t9 = t0.Add(time.Duration(9) * d)
 )
 
 type allow struct {
@@ -146,94 +136,13 @@ func TestSimultaneousRequests(t *testing.T) {
 	}
 
 	wg.Add(numRequests)
-	for i := 0; i < numRequests; i++ {
+	for range numRequests {
 		go f()
 	}
 	wg.Wait()
 	if numOK != burst {
 		t.Errorf("numOK = %d, want %d", numOK, burst)
 	}
-}
-
-func TestLongRunningQPS(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping in short mode")
-	}
-	if runtime.GOOS == "openbsd" {
-		t.Skip("low resolution time.Sleep invalidates test (golang.org/issue/14183)")
-		return
-	}
-
-	// The test runs for a few seconds executing many requests and then checks
-	// that overall number of requests is reasonable.
-	const (
-		limit = 100
-		burst = 100
-	)
-	var numOK = int32(0)
-
-	lim := NewLimiter(limit, burst)
-
-	var wg sync.WaitGroup
-	f := func() {
-		if ok := lim.Allow(); ok {
-			atomic.AddInt32(&numOK, 1)
-		}
-		wg.Done()
-	}
-
-	// This will still offer ~500 requests per second,
-	// but won't consume outrageous amount of CPU.
-	start := time.Now()
-	end := start.Add(5 * time.Second)
-	ticker := time.NewTicker(2 * time.Millisecond)
-	defer ticker.Stop()
-	for now := range ticker.C {
-		if now.After(end) {
-			break
-		}
-		wg.Add(1)
-		go f()
-	}
-	wg.Wait()
-	elapsed := time.Since(start)
-	ideal := burst + (limit * float64(elapsed) / float64(time.Second))
-
-	// We should never get more requests than allowed.
-	if want := int32(ideal + 1); numOK > want {
-		t.Errorf("numOK = %d, want %d (ideal %f)", numOK, want, ideal)
-	}
-	// We should get very close to the number of requests allowed.
-	if want := int32(0.995 * ideal); numOK < want {
-		t.Errorf("numOK = %d, want %d (ideal %f)", numOK, want, ideal)
-	}
-}
-
-type request struct {
-	t   time.Time
-	n   int
-	act time.Time
-	ok  bool
-}
-
-// dFromDuration converts a duration to a multiple of the global constant d
-func dFromDuration(dur time.Duration) int {
-	// Adding a millisecond to be swallowed by the integer division
-	// because we don't care about small inaccuracies
-	return int((dur + time.Millisecond) / d)
-}
-
-// dSince returns multiples of d since t0
-func dSince(t mono.Time) int {
-	return dFromDuration(t.Sub(t0))
-}
-
-type wait struct {
-	name   string
-	ctx    context.Context
-	n      int
-	delay  int // in multiples of d
-	nilErr bool
 }
 
 func BenchmarkAllowN(b *testing.B) {

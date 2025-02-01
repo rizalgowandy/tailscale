@@ -1,6 +1,5 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 package packet
 
@@ -40,7 +39,7 @@ func (h UDP6Header) Marshal(buf []byte) error {
 	binary.BigEndian.PutUint16(buf[46:48], 0) // blank checksum
 
 	// UDP checksum with IP pseudo header.
-	h.IP6Header.marshalPseudo(buf)
+	h.IP6Header.marshalPseudo(buf, ipproto.UDP)
 	binary.BigEndian.PutUint16(buf[46:48], ip4Checksum(buf[:]))
 
 	h.IP6Header.Marshal(buf)

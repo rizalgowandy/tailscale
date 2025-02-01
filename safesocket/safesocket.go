@@ -1,21 +1,17 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 // Package safesocket creates either a Unix socket, if possible, or
 // otherwise a localhost TCP connection.
 package safesocket
 
 import (
+	"context"
 	"errors"
 	"net"
 	"runtime"
 	"time"
 )
-
-// WindowsLocalPort is the default localhost TCP port
-// used by safesocket on Windows.
-const WindowsLocalPort = 41112
 
 type closeable interface {
 	CloseRead() error
@@ -57,11 +53,14 @@ func tailscaledStillStarting() bool {
 	return tailscaledProcExists()
 }
 
-// Connect connects to either path (on Unix) or the provided localhost port (on Windows).
-func Connect(path string, port uint16) (net.Conn, error) {
+// ConnectContext connects to tailscaled using a unix socket or named pipe.
+func ConnectContext(ctx context.Context, path string) (net.Conn, error) {
 	for {
-		c, err := connect(path, port)
+		c, err := connect(ctx, path)
 		if err != nil && tailscaledStillStarting() {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			time.Sleep(250 * time.Millisecond)
 			continue
 		}
@@ -69,11 +68,16 @@ func Connect(path string, port uint16) (net.Conn, error) {
 	}
 }
 
+// Connect connects to tailscaled using a unix socket or named pipe.
+// Deprecated: use ConnectContext instead.
+func Connect(path string) (net.Conn, error) {
+	return ConnectContext(context.Background(), path)
+}
+
 // Listen returns a listener either on Unix socket path (on Unix), or
-// the localhost port (on Windows).
-// If port is 0, the returned gotPort says which port was selected on Windows.
-func Listen(path string, port uint16) (_ net.Listener, gotPort uint16, _ error) {
-	return listen(path, port)
+// the NamedPipe path (on Windows).
+func Listen(path string) (net.Listener, error) {
+	return listen(path)
 }
 
 var (

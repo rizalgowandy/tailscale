@@ -1,6 +1,5 @@
-// Copyright (c) 2019 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 // Package atomicfile contains code related to writing to filesystems
 // atomically.
@@ -9,16 +8,22 @@
 package atomicfile // import "tailscale.com/atomicfile"
 
 import (
-	"io/ioutil"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 )
 
-// WriteFile writes data to filename+some suffix, then renames it
-// into filename.
+// WriteFile writes data to filename+some suffix, then renames it into filename.
+// The perm argument is ignored on Windows, but if the target filename already
+// exists then the target file's attributes and ACLs are preserved. If the target
+// filename already exists but is not a regular file, WriteFile returns an error.
 func WriteFile(filename string, data []byte, perm os.FileMode) (err error) {
-	f, err := ioutil.TempFile(filepath.Dir(filename), filepath.Base(filename)+".tmp")
+	fi, err := os.Stat(filename)
+	if err == nil && !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s already exists and is not a regular file", filename)
+	}
+	f, err := os.CreateTemp(filepath.Dir(filename), filepath.Base(filename)+".tmp")
 	if err != nil {
 		return err
 	}
@@ -43,5 +48,5 @@ func WriteFile(filename string, data []byte, perm os.FileMode) (err error) {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, filename)
+	return rename(tmpName, filename)
 }

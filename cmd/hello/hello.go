@@ -1,21 +1,22 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
-// The hello binary runs hello.ipn.dev.
+// The hello binary runs hello.ts.net.
 package main // import "tailscale.com/cmd/hello"
 
 import (
 	"context"
+	"crypto/tls"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"html/template"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"tailscale.com/client/tailscale"
 	"tailscale.com/client/tailscale/apitype"
@@ -30,10 +31,12 @@ var (
 //go:embed hello.tmpl.html
 var embeddedTemplate string
 
+var localClient tailscale.LocalClient
+
 func main() {
 	flag.Parse()
 	if *testIP != "" {
-		res, err := tailscale.WhoIs(context.Background(), *testIP)
+		res, err := localClient.WhoIs(context.Background(), *testIP)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -69,11 +72,31 @@ func main() {
 	if *httpsAddr != "" {
 		log.Printf("running HTTPS server on %s", *httpsAddr)
 		go func() {
-			errc <- http.ListenAndServeTLS(*httpsAddr,
-				"/etc/hello/hello.ipn.dev.crt",
-				"/etc/hello/hello.ipn.dev.key",
-				nil,
-			)
+			hs := &http.Server{
+				Addr: *httpsAddr,
+				TLSConfig: &tls.Config{
+					GetCertificate: func(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+						switch hi.ServerName {
+						case "hello.ts.net":
+							return localClient.GetCertificate(hi)
+						case "hello.ipn.dev":
+							c, err := tls.LoadX509KeyPair(
+								"/etc/hello/hello.ipn.dev.crt",
+								"/etc/hello/hello.ipn.dev.key",
+							)
+							if err != nil {
+								return nil, err
+							}
+							return &c, nil
+						}
+						return nil, errors.New("invalid SNI name")
+					},
+				},
+				IdleTimeout:       30 * time.Second,
+				ReadHeaderTimeout: 20 * time.Second,
+				MaxHeaderBytes:    10 << 10,
+			}
+			errc <- hs.ListenAndServeTLS("", "")
 		}()
 	}
 	log.Fatal(<-errc)
@@ -83,7 +106,7 @@ func devMode() bool { return *httpsAddr == "" && *httpAddr != "" }
 
 func getTmpl() (*template.Template, error) {
 	if devMode() {
-		tmplData, err := ioutil.ReadFile("hello.tmpl.html")
+		tmplData, err := os.ReadFile("hello.tmpl.html")
 		if os.IsNotExist(err) {
 			log.Printf("using baked-in template in dev mode; can't find hello.tmpl.html in current directory")
 			return tmpl, nil
@@ -112,13 +135,13 @@ func tailscaleIP(who *apitype.WhoIsResponse) string {
 		return ""
 	}
 	for _, nodeIP := range who.Node.Addresses {
-		if nodeIP.IP().Is4() && nodeIP.IsSingleIP() {
-			return nodeIP.IP().String()
+		if nodeIP.Addr().Is4() && nodeIP.IsSingleIP() {
+			return nodeIP.Addr().String()
 		}
 	}
 	for _, nodeIP := range who.Node.Addresses {
 		if nodeIP.IsSingleIP() {
-			return nodeIP.IP().String()
+			return nodeIP.Addr().String()
 		}
 	}
 	return ""
@@ -127,14 +150,19 @@ func tailscaleIP(who *apitype.WhoIsResponse) string {
 func root(w http.ResponseWriter, r *http.Request) {
 	if r.TLS == nil && *httpsAddr != "" {
 		host := r.Host
-		if strings.Contains(r.Host, "100.101.102.103") {
-			host = "hello.ipn.dev"
+		if strings.Contains(r.Host, "100.101.102.103") ||
+			strings.Contains(r.Host, "hello.ipn.dev") {
+			host = "hello.ts.net"
 		}
 		http.Redirect(w, r, "https://"+host, http.StatusFound)
 		return
 	}
 	if r.RequestURI != "/" {
 		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	if r.TLS != nil && *httpsAddr != "" && strings.Contains(r.Host, "hello.ipn.dev") {
+		http.Redirect(w, r, "https://hello.ts.net", http.StatusFound)
 		return
 	}
 	tmpl, err := getTmpl()
@@ -144,7 +172,7 @@ func root(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	who, err := tailscale.WhoIs(r.Context(), r.RemoteAddr)
+	who, err := localClient.WhoIs(r.Context(), r.RemoteAddr)
 	var data tmplData
 	if err != nil {
 		if devMode() {
@@ -168,7 +196,7 @@ func root(w http.ResponseWriter, r *http.Request) {
 			LoginName:     who.UserProfile.LoginName,
 			ProfilePicURL: who.UserProfile.ProfilePicURL,
 			MachineName:   firstLabel(who.Node.ComputedName),
-			MachineOS:     who.Node.Hostinfo.OS,
+			MachineOS:     who.Node.Hostinfo.OS(),
 			IP:            tailscaleIP(who),
 		}
 	}
@@ -178,8 +206,6 @@ func root(w http.ResponseWriter, r *http.Request) {
 
 // firstLabel s up until the first period, if any.
 func firstLabel(s string) string {
-	if i := strings.Index(s, "."); i != -1 {
-		return s[:i]
-	}
+	s, _, _ = strings.Cut(s, ".")
 	return s
 }

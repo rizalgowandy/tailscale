@@ -1,9 +1,7 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !windows
-// +build !windows
+//go:build !windows && !plan9
 
 package vms
 
@@ -17,7 +15,6 @@ import (
 	"testing"
 	"text/template"
 
-	"tailscale.com/tstest/integration"
 	"tailscale.com/types/logger"
 )
 
@@ -74,7 +71,7 @@ let
 
     # The path on disk to the "source code" of the package, in this case it is
     # the path to the binaries that are built. This needs to be the raw
-    # unquoted slash-separated path, not a string contaning the path because Nix
+    # unquoted slash-separated path, not a string containing the path because Nix
     # has a special path type.
     src = {{.BinPath}};
 
@@ -125,7 +122,7 @@ in {
   systemd.services.cloud-final.path = with pkgs; [ curl ];
 
   # Curl is needed for one of the integration tests
-  environment.systemPackages = with pkgs; [ curl ];
+  environment.systemPackages = with pkgs; [ curl nix bash squid openssl daemonize ];
 
   # yolo, this vm can sudo freely.
   security.sudo.wheelNeedsPassword = false;
@@ -153,15 +150,15 @@ in {
   systemd.services.tailscaled.environment."TS_LOG_TARGET" = "{{.LogTarget}}";
 }`
 
-func copyUnit(t *testing.T, bins *integration.Binaries) {
+func (h *Harness) copyUnit(t *testing.T) {
 	t.Helper()
 
 	data, err := os.ReadFile("../../../cmd/tailscaled/tailscaled.service")
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.MkdirAll(filepath.Join(bins.Dir, "systemd"), 0755)
-	err = os.WriteFile(filepath.Join(bins.Dir, "systemd", "tailscaled.service"), data, 0666)
+	os.MkdirAll(filepath.Join(h.binaryDir, "systemd"), 0755)
+	err = os.WriteFile(filepath.Join(h.binaryDir, "systemd", "tailscaled.service"), data, 0666)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +169,7 @@ func (h *Harness) makeNixOSImage(t *testing.T, d Distro, cdir string) string {
 		t.Skip("https://github.com/NixOS/nixpkgs/issues/131098")
 	}
 
-	copyUnit(t, h.bins)
+	h.copyUnit(t)
 	dir := t.TempDir()
 	fname := filepath.Join(dir, d.Name+".nix")
 	fout, err := os.Create(fname)
@@ -185,7 +182,7 @@ func (h *Harness) makeNixOSImage(t *testing.T, d Distro, cdir string) string {
 		BinPath   string
 		LogTarget string
 	}{
-		BinPath:   h.bins.Dir,
+		BinPath:   h.binaryDir,
 		LogTarget: h.loginServerURL,
 	})
 	if err != nil {

@@ -1,14 +1,13 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !windows
-// +build !windows
+//go:build !windows && !plan9
 
 package vms
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -22,11 +21,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"tailscale.com/types/logger"
@@ -48,6 +48,26 @@ func (vm *vmInstance) running() bool {
 	}
 }
 
+func (vm *vmInstance) waitStartup(t *testing.T) {
+	t.Helper()
+	for range 100 {
+		if vm.running() {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !vm.running() {
+		t.Fatal("vm not running")
+	}
+}
+
+func (h *Harness) makeImage(t *testing.T, d Distro, cdir string) string {
+	if !strings.HasPrefix(d.Name, "nixos") {
+		t.Fatal("image generation for non-nixos is not implemented")
+	}
+	return h.makeNixOSImage(t, d, cdir)
+}
+
 // mkVM makes a KVM-accelerated virtual machine and prepares it for introduction
 // to the testcontrol server. The function it returns is for killing the virtual
 // machine when it is time for it to die.
@@ -66,7 +86,14 @@ func (h *Harness) mkVM(t *testing.T, n int, d Distro, sshKey, hostURL, tdir stri
 		t.Fatal(err)
 	}
 
-	mkLayeredQcow(t, tdir, d, fetchDistro(t, d))
+	var qcowPath string
+	if d.HostGenerated {
+		qcowPath = h.makeImage(t, d, cdir)
+	} else {
+		qcowPath = fetchDistro(t, d)
+	}
+
+	mkLayeredQcow(t, tdir, d, qcowPath)
 	mkSeed(t, d, sshKey, hostURL, tdir, port)
 
 	driveArg := fmt.Sprintf("file=%s,if=virtio", filepath.Join(tdir, d.Name+".qcow2"))
@@ -171,21 +198,19 @@ func fetchFromS3(t *testing.T, fout *os.File, d Distro) bool {
 		return false
 	}
 
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String("us-east-1"),
-	})
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
 	if err != nil {
-		t.Logf("can't make AWS session: %v", err)
+		t.Logf("can't load AWS credentials: %v", err)
 		return false
 	}
 
-	dler := s3manager.NewDownloader(sess, func(d *s3manager.Downloader) {
+	dler := manager.NewDownloader(s3.NewFromConfig(cfg), func(d *manager.Downloader) {
 		d.PartSize = 64 * 1024 * 1024 // 64MB per part
 	})
 
 	t.Logf("fetching s3://%s/%s", bucketName, d.SHA256Sum)
 
-	_, err = dler.Download(fout, &s3.GetObjectInput{
+	_, err = dler.Download(context.TODO(), fout, &s3.GetObjectInput{
 		Bucket: aws.String(bucketName),
 		Key:    aws.String(d.SHA256Sum),
 	})
@@ -291,7 +316,6 @@ func checkCachedImageHash(t *testing.T, d Distro, cacheDir string) string {
 }
 
 func (h *Harness) copyBinaries(t *testing.T, d Distro, conn *ssh.Client) {
-	bins := h.bins
 	if strings.HasPrefix(d.Name, "nixos") {
 		return
 	}
@@ -306,8 +330,8 @@ func (h *Harness) copyBinaries(t *testing.T, d Distro, conn *ssh.Client) {
 	mkdir(t, cli, "/etc/default")
 	mkdir(t, cli, "/var/lib/tailscale")
 
-	copyFile(t, cli, bins.Daemon, "/usr/sbin/tailscaled")
-	copyFile(t, cli, bins.CLI, "/usr/bin/tailscale")
+	copyFile(t, cli, h.daemon, "/usr/sbin/tailscaled")
+	copyFile(t, cli, h.cli, "/usr/bin/tailscale")
 
 	// TODO(Xe): revisit this assumption before it breaks the test.
 	copyFile(t, cli, "../../../cmd/tailscaled/tailscaled.defaults", "/etc/default/tailscaled")

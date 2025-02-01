@@ -1,9 +1,7 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !windows
-// +build !windows
+//go:build !windows && !plan9
 
 package vms
 
@@ -13,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +27,8 @@ import (
 	expect "github.com/tailscale/goexpect"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/semaphore"
-	"inet.af/netaddr"
 	"tailscale.com/tstest"
+	"tailscale.com/tstest/integration"
 	"tailscale.com/types/logger"
 )
 
@@ -51,6 +50,13 @@ var (
 		return result
 	}()
 )
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	v := m.Run()
+	integration.CleanupBinaries()
+	os.Exit(v)
+}
 
 func TestDownloadImages(t *testing.T) {
 	if !*runVMTests {
@@ -95,7 +101,8 @@ func mkLayeredQcow(t *testing.T, tdir string, d Distro, qcowBase string) {
 
 	run(t, tdir, "qemu-img", "create",
 		"-f", "qcow2",
-		"-o", "backing_file="+qcowBase,
+		"-b", qcowBase,
+		"-F", "qcow2",
 		filepath.Join(tdir, d.Name+".qcow2"),
 	)
 }
@@ -267,17 +274,14 @@ func testOneDistribution(t *testing.T, n int, distro Distro) {
 	t.Cleanup(func() { ramsem.sem.Release(int64(distro.MemoryMegs)) })
 
 	vm := h.mkVM(t, n, distro, h.pubKey, h.loginServerURL, dir)
-	var ipm ipMapping
+	vm.waitStartup(t)
 
-	for i := 0; i < 100; i++ {
-		if vm.running() {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !vm.running() {
-		t.Fatal("vm not running")
-	}
+	h.testDistro(t, distro, h.waitForIPMap(t, vm, distro))
+}
+
+func (h *Harness) waitForIPMap(t *testing.T, vm *vmInstance, distro Distro) ipMapping {
+	t.Helper()
+	var ipm ipMapping
 
 	waiter := time.NewTicker(time.Second)
 	defer waiter.Stop()
@@ -296,13 +300,11 @@ func testOneDistribution(t *testing.T, n int, distro Distro) {
 		}
 		<-waiter.C
 	}
-
-	h.testDistro(t, distro, ipm)
+	return ipm
 }
 
-func (h *Harness) testDistro(t *testing.T, d Distro, ipm ipMapping) {
+func (h *Harness) setupSSHShell(t *testing.T, d Distro, ipm ipMapping) (*ssh.ClientConfig, *ssh.Client) {
 	signer := h.signer
-	loginServer := h.loginServerURL
 
 	t.Helper()
 	port := ipm.port
@@ -319,7 +321,7 @@ func (h *Harness) testDistro(t *testing.T, d Distro, ipm ipMapping) {
 	// don't use socket activation.
 	const maxRetries = 5
 	var working bool
-	for i := 0; i < maxRetries; i++ {
+	for range maxRetries {
 		cli, err := ssh.Dial("tcp", hostport, ccfg)
 		if err == nil {
 			working = true
@@ -340,6 +342,13 @@ func (h *Harness) testDistro(t *testing.T, d Distro, ipm ipMapping) {
 		t.Fatal(err)
 	}
 	h.copyBinaries(t, d, cli)
+
+	return ccfg, cli
+}
+
+func (h *Harness) testDistro(t *testing.T, d Distro, ipm ipMapping) {
+	loginServer := h.loginServerURL
+	ccfg, cli := h.setupSSHShell(t, d, ipm)
 
 	timeout := 30 * time.Second
 
@@ -368,6 +377,7 @@ func (h *Harness) testDistro(t *testing.T, d Distro, ipm ipMapping) {
 	t.Run("login", func(t *testing.T) {
 		runTestCommands(t, timeout, cli, []expect.Batcher{
 			&expect.BSnd{S: fmt.Sprintf("tailscale up --login-server=%s\n", loginServer)},
+			&expect.BSnd{S: "echo Success.\n"},
 			&expect.BExp{R: `Success.`},
 		})
 	})
@@ -428,7 +438,7 @@ func (h *Harness) testDistro(t *testing.T, d Distro, ipm ipMapping) {
 
 	for _, tt := range []struct {
 		ipProto string
-		addr    netaddr.IP
+		addr    netip.Addr
 	}{
 		{"ipv4", h.testerV4},
 	} {
@@ -440,7 +450,7 @@ func (h *Harness) testDistro(t *testing.T, d Distro, ipm ipMapping) {
 				t.Fatalf("can't get IP: %v", err)
 			}
 
-			netaddr.MustParseIP(string(bytes.TrimSpace(ipBytes)))
+			netip.MustParseAddr(string(bytes.TrimSpace(ipBytes)))
 		})
 
 		t.Run("ping-"+tt.ipProto, func(t *testing.T) {

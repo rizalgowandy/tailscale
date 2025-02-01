@@ -1,6 +1,5 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 // Package integration contains Tailscale integration tests.
 //
@@ -14,7 +13,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -32,48 +30,78 @@ import (
 	"go4.org/mem"
 	"tailscale.com/derp"
 	"tailscale.com/derp/derphttp"
-	"tailscale.com/logtail"
 	"tailscale.com/net/stun/stuntest"
-	"tailscale.com/smallzstd"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/logid"
 	"tailscale.com/types/nettype"
+	"tailscale.com/util/zstdframe"
 	"tailscale.com/version"
 )
 
-// Binaries are the paths to a tailscaled and tailscale binary.
-// These can be shared by multiple nodes.
-type Binaries struct {
-	Dir    string // temp dir for tailscale & tailscaled
-	Daemon string // tailscaled
-	CLI    string // tailscale
-}
-
-// BuildTestBinaries builds tailscale and tailscaled, failing the test
-// if they fail to compile.
-func BuildTestBinaries(t testing.TB) *Binaries {
-	td := t.TempDir()
-	build(t, td, "tailscale.com/cmd/tailscaled", "tailscale.com/cmd/tailscale")
-	return &Binaries{
-		Dir:    td,
-		Daemon: filepath.Join(td, "tailscaled"+exe()),
-		CLI:    filepath.Join(td, "tailscale"+exe()),
+// CleanupBinaries cleans up any resources created by calls to BinaryDir, TailscaleBinary, or TailscaledBinary.
+// It should be called from TestMain after all tests have completed.
+func CleanupBinaries() {
+	buildOnce.Do(func() {})
+	if binDir != "" {
+		os.RemoveAll(binDir)
 	}
 }
 
-// buildMu limits our use of "go build" to one at a time, so we don't
-// fight Go's built-in caching trying to do the same build concurrently.
-var buildMu sync.Mutex
+// BinaryDir returns a directory containing test tailscale and tailscaled binaries.
+// If any test calls BinaryDir, there must be a TestMain function that calls
+// CleanupBinaries after all tests are complete.
+func BinaryDir(tb testing.TB) string {
+	buildOnce.Do(func() {
+		binDir, buildErr = buildTestBinaries()
+	})
+	if buildErr != nil {
+		tb.Fatal(buildErr)
+	}
+	return binDir
+}
 
-func build(t testing.TB, outDir string, targets ...string) {
-	buildMu.Lock()
-	defer buildMu.Unlock()
+// TailscaleBinary returns the path to the test tailscale binary.
+// If any test calls TailscaleBinary, there must be a TestMain function that calls
+// CleanupBinaries after all tests are complete.
+func TailscaleBinary(tb testing.TB) string {
+	return filepath.Join(BinaryDir(tb), "tailscale"+exe())
+}
 
-	t0 := time.Now()
-	defer func() { t.Logf("built %s in %v", targets, time.Since(t0).Round(time.Millisecond)) }()
+// TailscaledBinary returns the path to the test tailscaled binary.
+// If any test calls TailscaleBinary, there must be a TestMain function that calls
+// CleanupBinaries after all tests are complete.
+func TailscaledBinary(tb testing.TB) string {
+	return filepath.Join(BinaryDir(tb), "tailscaled"+exe())
+}
 
-	goBin := findGo(t)
+var (
+	buildOnce sync.Once
+	buildErr  error
+	binDir    string
+)
+
+// buildTestBinaries builds tailscale and tailscaled.
+// It returns the dir containing the binaries.
+func buildTestBinaries() (string, error) {
+	bindir, err := os.MkdirTemp("", "")
+	if err != nil {
+		return "", err
+	}
+	err = build(bindir, "tailscale.com/cmd/tailscaled", "tailscale.com/cmd/tailscale")
+	if err != nil {
+		os.RemoveAll(bindir)
+		return "", err
+	}
+	return bindir, nil
+}
+
+func build(outDir string, targets ...string) error {
+	goBin, err := findGo()
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command(goBin, "install")
 	if version.IsRace() {
 		cmd.Args = append(cmd.Args, "-race")
@@ -82,34 +110,63 @@ func build(t testing.TB, outDir string, targets ...string) {
 	cmd.Env = append(os.Environ(), "GOARCH="+runtime.GOARCH, "GOBIN="+outDir)
 	errOut, err := cmd.CombinedOutput()
 	if err == nil {
-		return
+		return nil
 	}
 	if strings.Contains(string(errOut), "when GOBIN is set") {
 		// Fallback slow path for cross-compiled binaries.
 		for _, target := range targets {
 			outFile := filepath.Join(outDir, path.Base(target)+exe())
-			cmd := exec.Command(goBin, "build", "-o", outFile, target)
+			cmd := exec.Command(goBin, "build", "-o", outFile)
+			if version.IsRace() {
+				cmd.Args = append(cmd.Args, "-race")
+			}
+			cmd.Args = append(cmd.Args, target)
 			cmd.Env = append(os.Environ(), "GOARCH="+runtime.GOARCH)
 			if errOut, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("failed to build %v with %v: %v, %s", target, goBin, err, errOut)
+				return fmt.Errorf("failed to build %v with %v: %v, %s", target, goBin, err, errOut)
 			}
 		}
-		return
+		return nil
 	}
-	t.Fatalf("failed to build %v with %v: %v, %s", targets, goBin, err, errOut)
+	return fmt.Errorf("failed to build %v with %v: %v, %s", targets, goBin, err, errOut)
 }
 
-func findGo(t testing.TB) string {
-	goBin := filepath.Join(runtime.GOROOT(), "bin", "go"+exe())
-	if fi, err := os.Stat(goBin); err != nil {
-		if os.IsNotExist(err) {
-			t.Fatalf("failed to find go at %v", goBin)
+func findGo() (string, error) {
+	// Go 1.19 attempted to be helpful by prepending $PATH with GOROOT/bin based
+	// on the executed go binary when invoked using `go test` or `go generate`,
+	// however, this doesn't cover cases when run otherwise, such as via `go run`.
+	// runtime.GOROOT() may often be empty these days, so the safe thing to do
+	// here is, in order:
+	// 1. Look for a go binary in $PATH[0].
+	// 2. Look for a go binary in runtime.GOROOT()/bin if runtime.GOROOT() is non-empty.
+	// 3. Look for a go binary in $PATH.
+
+	// For tests we want to run as root on GitHub actions, we run with -exec=sudo,
+	// but that results in this test running with a different PATH and picking the
+	// wrong Go. So hard code the GitHub Actions case.
+	if os.Getuid() == 0 && os.Getenv("GITHUB_ACTIONS") == "true" {
+		const sudoGithubGo = "/home/runner/.cache/tailscale-go/bin/go"
+		if _, err := os.Stat(sudoGithubGo); err == nil {
+			return sudoGithubGo, nil
 		}
-		t.Fatalf("looking for go binary: %v", err)
-	} else if !fi.Mode().IsRegular() {
-		t.Fatalf("%v is unexpected %v", goBin, fi.Mode())
 	}
-	return goBin
+
+	paths := strings.FieldsFunc(os.Getenv("PATH"), func(r rune) bool { return os.IsPathSeparator(uint8(r)) })
+	if len(paths) > 0 {
+		candidate := filepath.Join(paths[0], "go"+exe())
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, err
+		}
+	}
+
+	if runtime.GOROOT() != "" {
+		candidate := filepath.Join(runtime.GOROOT(), "bin", "go"+exe())
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, err
+		}
+	}
+
+	return exec.LookPath("go")
 }
 
 func exe() string {
@@ -133,6 +190,7 @@ func RunDERPAndSTUN(t testing.TB, logf logger.Logf, ipAddress string) (derpMap *
 	}
 
 	httpsrv := httptest.NewUnstartedServer(derphttp.Handler(d))
+	httpsrv.Listener.Close()
 	httpsrv.Listener = ln
 	httpsrv.Config.ErrorLog = logger.StdLogger(logf)
 	httpsrv.Config.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
@@ -182,6 +240,7 @@ type LogCatcher struct {
 	buf    bytes.Buffer
 	gotErr error
 	reqs   int
+	raw    bool // indicates whether to store the raw JSON logs uploaded, instead of just the text
 }
 
 // UseLogf makes the logcatcher implementation use a given logf function
@@ -190,6 +249,13 @@ func (lc *LogCatcher) UseLogf(fn logger.Logf) {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	lc.logf = fn
+}
+
+// StoreRawJSON instructs lc to save the raw JSON uploads, rather than just the text.
+func (lc *LogCatcher) StoreRawJSON() {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	lc.raw = true
 }
 
 func (lc *LogCatcher) logsContains(sub mem.RO) bool {
@@ -231,22 +297,24 @@ func (lc *LogCatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// collectionName := pathPaths[0]
-	privID, err := logtail.ParsePrivateID(pathParts[1])
+	privID, err := logid.ParsePrivateID(pathParts[1])
 	if err != nil {
 		log.Printf("bad log ID: %q: %v", r.URL.Path, err)
 	}
 
-	var body io.Reader = r.Body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("http.Request.Body.Read: %v", err)
+		return
+	}
 	if r.Header.Get("Content-Encoding") == "zstd" {
-		var err error
-		body, err = smallzstd.NewDecoder(body)
+		bodyBytes, err = zstdframe.AppendDecode(nil, bodyBytes)
 		if err != nil {
-			log.Printf("bad caught zstd: %v", err)
+			log.Printf("zstdframe.AppendDecode: %v", err)
 			http.Error(w, err.Error(), 400)
 			return
 		}
 	}
-	bodyBytes, _ := ioutil.ReadAll(body)
 
 	type Entry struct {
 		Logtail struct {
@@ -281,6 +349,10 @@ func (lc *LogCatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		id := privID.Public().String()[:3] // good enough for integration tests
 		for _, ent := range jreq {
+			if lc.raw {
+				lc.buf.Write(bodyBytes)
+				continue
+			}
 			fmt.Fprintf(&lc.buf, "%s\n", strings.TrimSpace(ent.Text))
 			if lc.logf != nil {
 				lc.logf("logcatch:%s: %s", id, strings.TrimSpace(ent.Text))

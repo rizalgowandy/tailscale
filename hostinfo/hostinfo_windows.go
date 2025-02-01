@@ -1,39 +1,94 @@
-// Copyright (c) 2020 Tailscale Inc & AUTHORS All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) Tailscale Inc & AUTHORS
+// SPDX-License-Identifier: BSD-3-Clause
 
 package hostinfo
 
 import (
-	"os/exec"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
-	"sync/atomic"
-	"syscall"
+
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
+	"tailscale.com/types/ptr"
+	"tailscale.com/util/winutil"
+	"tailscale.com/util/winutil/winenv"
 )
 
 func init() {
-	osVersion = osVersionWindows
+	distroName = lazyDistroName.Get
+	osVersion = lazyOSVersion.Get
+	packageType = lazyPackageType.Get
 }
 
-var winVerCache atomic.Value // of string
+var (
+	lazyDistroName  = &lazyAtomicValue[string]{f: ptr.To(distroNameWindows)}
+	lazyOSVersion   = &lazyAtomicValue[string]{f: ptr.To(osVersionWindows)}
+	lazyPackageType = &lazyAtomicValue[string]{f: ptr.To(packageTypeWindows)}
+)
+
+func distroNameWindows() string {
+	if winenv.IsWindowsServer() {
+		return "Server"
+	}
+	return ""
+}
 
 func osVersionWindows() string {
-	if s, ok := winVerCache.Load().(string); ok {
-		return s
-	}
-	cmd := exec.Command("cmd", "/c", "ver")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, _ := cmd.Output() // "\nMicrosoft Windows [Version 10.0.19041.388]\n\n"
-	s := strings.TrimSpace(string(out))
-	s = strings.TrimPrefix(s, "Microsoft Windows [")
-	s = strings.TrimSuffix(s, "]")
-
-	// "Version 10.x.y.z", with "Version" localized. Keep only stuff after the space.
-	if sp := strings.Index(s, " "); sp != -1 {
-		s = s[sp+1:]
-	}
-	if s != "" {
-		winVerCache.Store(s)
+	major, minor, build := windows.RtlGetNtVersionNumbers()
+	s := fmt.Sprintf("%d.%d.%d", major, minor, build)
+	// Windows 11 still uses 10 as its major number internally
+	if major == 10 {
+		if ubr, err := getUBR(); err == nil {
+			s += fmt.Sprintf(".%d", ubr)
+		}
 	}
 	return s // "10.0.19041.388", ideally
+}
+
+// getUBR obtains a fourth version field, the "Update Build Revision",
+// from the registry. This field is only available beginning with Windows 10.
+func getUBR() (uint32, error) {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if err != nil {
+		return 0, err
+	}
+	defer key.Close()
+
+	val, valType, err := key.GetIntegerValue("UBR")
+	if err != nil {
+		return 0, err
+	}
+	if valType != registry.DWORD {
+		return 0, registry.ErrUnexpectedType
+	}
+
+	return uint32(val), nil
+}
+
+func packageTypeWindows() string {
+	if _, err := os.Stat(`C:\ProgramData\chocolatey\lib\tailscale`); err == nil {
+		return "choco"
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	home, _ := os.UserHomeDir()
+	if strings.HasPrefix(exe, filepath.Join(home, "scoop", "apps", "tailscale")) {
+		return "scoop"
+	}
+	msiSentinel, _ := winutil.GetRegInteger("MSI")
+	if msiSentinel != 1 {
+		// Atypical. Not worth trying to detect. Likely open
+		// source tailscaled or a developer running by hand.
+		return ""
+	}
+	result := "msi"
+	if env, _ := winutil.GetRegString("MSIDist"); env != "" {
+		result += "/" + env
+	}
+	return result
 }
